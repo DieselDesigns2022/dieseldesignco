@@ -39,12 +39,14 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
         $_SESSION=[]; session_regenerate_id(true); dd_go();
     }
     try {
-        if ($action==='save') {
+        if ($action==='save' || $action==='save_launch') {
             $id=(int)($_POST['id']??0);
             $subject=trim((string)($_POST['subject']??''));
             $body=trim((string)($_POST['body']??''));
             if ($subject==='' || strlen($subject)>150 || $body==='' || strlen($body)>30000) throw new RuntimeException('Subject (up to 150 characters) and message (up to 30,000 characters) are required.');
             if (preg_match('/[\r\n]/',$subject)) throw new RuntimeException('Subject must be one line.');
+            $body=dd_clean_html($body);
+            if (trim(strip_tags($body))==='' && !str_contains($body,'<img')) throw new RuntimeException('Email message is empty.');
             if ($id>0) {
                 $st=$db->prepare("UPDATE campaigns SET subject=?,body=? WHERE id=? AND status='draft'");
                 $st->execute([$subject,$body,$id]);
@@ -53,12 +55,16 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
                 $db->prepare('INSERT INTO campaigns(subject,body) VALUES (?,?)')->execute([$subject,$body]);
                 $id=(int)$db->lastInsertId();
             }
-            dd_flash('Draft saved.'); dd_go('?page=edit&id='.$id);
+            if ($action==='save') { dd_flash('Draft saved.'); dd_go('?page=edit&id='.$id); }
+            $action='launch';
+            $_POST['id']=$id;
         }
         if ($action==='test') {
             $subject=trim((string)($_POST['subject']??'')); $body=trim((string)($_POST['body']??''));
             if ($subject===''||$body==='') throw new RuntimeException('Enter a subject and message before testing.');
             if (strlen($subject)>150||strlen($body)>30000||preg_match('/[\r\n]/',$subject)) throw new RuntimeException('Message is too long or the subject contains line breaks.');
+            $body=dd_clean_html($body);
+            if (trim(strip_tags($body))==='' && !str_contains($body,'<img')) throw new RuntimeException('Email message is empty.');
             if (dd_remaining_quota($db)<1) throw new RuntimeException('Sending limit reached. Try tomorrow.');
             $recipient=(string)$cfg['test_email'];
             if (!filter_var($recipient,FILTER_VALIDATE_EMAIL)) throw new RuntimeException('Configure a valid test_email first.');
@@ -120,15 +126,17 @@ if ($logged && $page==='preview') {
     $st=$db->prepare('SELECT * FROM campaigns WHERE id=?'); $st->execute([(int)($_GET['id']??0)]);
     $campaign=$st->fetch();
     if (!$campaign) { http_response_code(404); exit('Not found'); }
-    $example=['id'=>1,'email'=>'preview@example.com'];
+    $example=['id'=>0,'email'=>'preview@example.com'];
     header('Content-Type: text/html; charset=utf-8');
-    echo dd_email_html($campaign['subject'],dd_render_body($campaign['body']),dd_unsub_url($example)); exit;
+    echo dd_email_html($campaign['subject'],dd_render_body($campaign['body']),null); exit;
 }
 header('Content-Type: text/html; charset=utf-8');
 ?><!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Diesel Designs | Email Admin</title>
 <style>
 :root{color-scheme:dark;--bg:#0c0911;--panel:#191222;--line:#403047;--pink:#fe8ed3;--purple:#aa82f5;--teal:#65e2e3;--text:#f6f3f9;--muted:#b8aebf}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 90% 0%,#291738 0,transparent 38%),var(--bg);color:var(--text);font-family:Arial,Helvetica,sans-serif}a{color:var(--teal)}button,.btn{display:inline-block;border:0;border-radius:10px;padding:11px 16px;background:linear-gradient(90deg,var(--pink),var(--purple));font:700 14px Arial;color:#160d1c;text-decoration:none;cursor:pointer}button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px solid var(--teal);outline-offset:2px}button.secondary,.btn.secondary{background:#30263b;color:#fff;border:1px solid #594b65}button.danger{background:#50263c;color:#fff;border:1px solid #a04d76}.wrap{max-width:1150px;padding:24px 18px;margin:auto}header.top{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:16px;border-bottom:1px solid var(--line);padding:18px max(18px,calc((100% - 1114px)/2))}.brand{font-size:19px;font-weight:900;letter-spacing:.04em}.brand span{color:var(--pink)}nav{display:flex;flex-wrap:wrap;gap:16px;align-items:center}nav a{color:#eee;text-decoration:none;font-size:14px}.panel{background:linear-gradient(150deg,#1c1527,#15101e);border:1px solid var(--line);border-radius:17px;padding:22px;margin-bottom:19px}.login{max-width:430px;margin:9vh auto}.login h1{font-size:25px}.muted{color:var(--muted)}h1{font-size:29px;margin:6px 0 18px}h2{font-size:20px;margin:4px 0 15px}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:13px;margin:0 0 18px}.stats .panel{margin:0}.number{font-size:31px;font-weight:900;margin-top:8px;color:var(--pink)}label{display:block;font-size:13px;font-weight:700;margin:15px 0 7px}input,textarea{width:100%;background:#0e0b15;color:#fff;border:1px solid #52445e;padding:12px;border-radius:9px;font:15px Arial}textarea{line-height:1.6;min-height:250px;resize:vertical}input[type=search]{max-width:330px}.actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:20px 0}.tablewrap{overflow-x:auto}table{width:100%;border-collapse:collapse;min-width:550px}td,th{text-align:left;padding:13px 10px;border-bottom:1px solid var(--line);font-size:13px}th{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.06em}.status{display:inline-block;border:1px solid #6a5479;padding:5px 9px;border-radius:30px;font-size:11px;font-weight:800}.status.active,.status.completed{color:#82e6b5;border-color:#347f5b}.status.pending,.status.sending{color:#f6d17b;border-color:#92763b}.status.unsubscribed{color:#e6a1ab;border-color:#8f5360}.flash{border:1px solid #8c688e;background:#2e1a38;border-radius:10px;padding:15px 18px;margin-bottom:17px}.inline{display:inline}small{color:var(--muted)}.layout{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:center}.hint{border-left:3px solid var(--teal);padding-left:13px;color:var(--muted);line-height:1.5}.pill{color:var(--teal);font-size:12px;font-weight:bold}
 @media(max-width:720px){.stats{grid-template-columns:repeat(2,1fr)}h1{font-size:24px}.wrap{padding:16px 12px}.panel{padding:17px}header.top{padding:16px}.actions .btn,.actions button{flex:1;text-align:center}}
+
+.editor-tabs{display:flex;gap:8px;margin:15px 0 9px}.editor-tabs button{background:#30263b;color:#fff;border:1px solid #594b65}.editor-tabs button.active{background:var(--teal);color:#0b0911}.editor-tools{display:flex;gap:7px;flex-wrap:wrap;margin:10px 0}.editor-tools button{background:#30263b;color:#fff;border:1px solid #594b65;padding:8px 11px;min-width:36px}.rich-editor{min-height:250px;border:1px solid #594b65;border-radius:10px;padding:17px;background:#fff;color:#29212f;line-height:1.6;overflow:auto}.rich-editor:focus{outline:2px solid var(--teal)}.rich-editor a{color:#936aed}.rich-editor img{max-width:100%;height:auto}.source-editor{min-height:250px;font:13px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace}.editor-hint{font-size:12px;color:var(--muted)}
 </style></head><body>
 <?php if (!$logged): ?><main class="wrap"><div class="panel login"><div class="brand">DIESEL <span>DESIGNS</span></div><h1>Email Dashboard</h1><p class="muted">Admin access only.</p>
 <?php if (!empty($_SESSION['flash'])): ?><div class="flash"><?=dd_e($_SESSION['flash'])?></div><?php unset($_SESSION['flash']); endif; ?>
@@ -168,13 +176,62 @@ header('Content-Type: text/html; charset=utf-8');
     if ($page==='edit') { $st=$db->prepare('SELECT * FROM campaigns WHERE id=?');$st->execute([$id]); $c=$st->fetch(); if (!$c) {echo '<h1>Campaign not found</h1>'; $c=null;} }
     if ($c): $draft=$c['status']==='draft'; ?>
 <div class="layout"><h1><?=($c['id']?'Email #'.(int)$c['id']:'Write a New Email')?></h1><a class="btn secondary" href="?page=campaigns">All campaigns</a></div>
-<div class="panel"><p class="hint">Your message automatically uses a branded email design with your Diesel Designs colors, a legal mailing address and an unsubscribe link. Paste full links (https://...) to make them clickable. Email messages are plain text with line breaks.</p>
+<div class="panel"><p class="hint">Write your email using the formatting buttons or switch to HTML to paste or edit your own markup. Emails automatically include your Diesel Designs header, mailing address and unsubscribe link. External images must use secure HTTPS links.</p>
 <form method="post" id="editor"><input type="hidden" name="csrf" value="<?=dd_e(dd_csrf())?>"><input type="hidden" name="action" id="email-action" value="save"><input type="hidden" name="id" value="<?=(int)$c['id']?>">
 <label for="subject">Subject</label><input id="subject" name="subject" maxlength="150" value="<?=dd_e($c['subject'])?>" required <?=(!$draft?'readonly':'')?> placeholder="New designs just dropped!">
-<label for="body">Email message</label><textarea id="body" name="body" maxlength="30000" required <?=(!$draft?'readonly':'')?> placeholder="Hey there!&#10;&#10;I have something exciting to share..."><?=dd_e($c['body'])?></textarea>
-<?php if($draft): ?><div class="actions"><button type="submit" onclick="document.getElementById('email-action').value='save'">Save draft</button><button type="submit" class="secondary" formnovalidate onclick="document.getElementById('email-action').value='test'">Send test to <?=dd_e((string)$cfg['test_email'])?></button></div><?php endif; ?>
+<label>Email message</label>
+<div class="editor-tabs"><button type="button" id="tab-rich" class="active" aria-pressed="true">Rich Text</button><button type="button" id="tab-html" aria-pressed="false">HTML</button></div>
+<?php if($draft): ?><div id="formatting-tools" class="editor-tools" aria-label="Formatting tools">
+<button type="button" data-cmd="bold" title="Bold"><strong>B</strong></button><button type="button" data-cmd="italic" title="Italic"><em>I</em></button><button type="button" data-cmd="underline" title="Underline"><u>U</u></button>
+<button type="button" data-cmd="insertUnorderedList" title="Bullet list">• List</button><button type="button" data-cmd="insertOrderedList" title="Numbered list">1. List</button>
+<button type="button" data-block="h2" title="Heading">Heading</button><button type="button" data-block="p" title="Paragraph">Paragraph</button>
+<button type="button" id="add-link" title="Insert link">Link</button><button type="button" id="add-image" title="Insert image from HTTPS URL">Image URL</button>
+<label for="text-color" class="editor-hint">Text color <input id="text-color" type="color" value="#fe8ed3" aria-label="Text color" style="width:42px;height:31px;padding:0;vertical-align:middle"></label>
+</div><?php endif; ?>
+<div id="visual-editor" class="rich-editor" contenteditable="<?=($draft?'true':'false')?>" role="textbox" aria-label="Rich text email body" aria-multiline="true"><?=dd_render_body((string)$c['body'])?></div>
+<textarea id="html-editor" class="source-editor" maxlength="30000" spellcheck="false" style="display:none" aria-label="Email body HTML" <?=(!$draft?'readonly':'')?>></textarea>
+<textarea id="body" name="body" hidden></textarea>
+<p class="editor-hint">HTML mode accepts safe body markup (paragraphs, headings, lists, links, images, and basic text styling). Scripts, embedded forms, and unsafe code are removed.</p>
+<?php if($draft): ?><div class="actions">
+<button type="submit" id="btn-save" data-action="save">Save Draft</button>
+<button type="submit" class="secondary" id="btn-test" data-action="test">Send Test to <?=dd_e((string)$cfg['test_email'])?></button>
+<button type="submit" id="btn-send" data-action="save_launch">Send to All Subscribers</button>
+</div><?php endif; ?>
 </form>
-<?php if($draft && $c['id']): ?><div class="actions"><form method="post" onsubmit="return confirm('Send this email to ALL confirmed subscribers? This cannot be undone.');"><input type="hidden" name="csrf" value="<?=dd_e(dd_csrf())?>"><input type="hidden" name="action" value="launch"><input type="hidden" name="id" value="<?=(int)$c['id']?>"><button type="submit">Send to all subscribers</button></form><a class="btn secondary" target="_blank" rel="noopener" href="?page=preview&id=<?=(int)$c['id']?>">Preview saved email</a></div><?php endif; ?>
+<?php if($c['id']): ?><div class="actions"><a class="btn secondary" target="_blank" rel="noopener" href="?page=preview&id=<?=(int)$c['id']?>">Preview saved email</a></div><?php endif; ?>
+<script>
+(() => {
+ const form=document.getElementById('editor'),rich=document.getElementById('visual-editor'),source=document.getElementById('html-editor'),body=document.getElementById('body');
+ const tabRich=document.getElementById('tab-rich'),tabHtml=document.getElementById('tab-html'),tools=document.getElementById('formatting-tools');
+ let mode='rich';
+ const switchMode=(next)=>{
+  if(next===mode)return;
+  if(next==='html'){ source.value=rich.innerHTML;source.style.display='block';rich.style.display='none';if(tools)tools.style.display='none'; }
+  else{ rich.innerHTML=source.value;rich.style.display='block';source.style.display='none';if(tools)tools.style.display='flex'; }
+  mode=next;tabRich.classList.toggle('active',next==='rich');tabHtml.classList.toggle('active',next==='html');
+  tabRich.setAttribute('aria-pressed',String(next==='rich'));tabHtml.setAttribute('aria-pressed',String(next==='html'));
+ };
+ tabRich.addEventListener('click',()=>switchMode('rich'));
+ tabHtml.addEventListener('click',()=>switchMode('html'));
+ <?php if($draft): ?>
+ const edit=(command,value)=>{rich.focus();document.execCommand(command,false,value||null);};
+ if(tools) tools.addEventListener('mousedown',e=>{if(e.target.closest('button'))e.preventDefault();});
+ if(tools) tools.querySelectorAll('[data-cmd]').forEach(b=>b.addEventListener('click',()=>edit(b.dataset.cmd)));
+ if(tools) tools.querySelectorAll('[data-block]').forEach(b=>b.addEventListener('click',()=>edit('formatBlock',b.dataset.block)));
+ const link=document.getElementById('add-link');link.addEventListener('click',()=>{const url=prompt('Enter a full https:// link');if(url && /^https?:\/\//i.test(url.trim()))edit('createLink',url.trim());});
+ const img=document.getElementById('add-image');img.addEventListener('click',()=>{const url=prompt('Enter a direct HTTPS image URL');if(url && /^https:\/\//i.test(url.trim()))edit('insertImage',url.trim());});
+ document.getElementById('text-color').addEventListener('input',e=>edit('foreColor',e.target.value));
+ form.querySelectorAll('[data-action]').forEach(b=>b.addEventListener('click',()=>document.getElementById('email-action').value=b.dataset.action));
+ <?php endif; ?>
+ form.addEventListener('submit',e=>{
+   body.value=(mode==='rich'?rich.innerHTML:source.value).trim();
+   if(!body.value || !body.value.replace(/<[^>]*>/g,'').trim() && !/<img\b/i.test(body.value)){e.preventDefault();alert('Please write your email before continuing.');return;}
+   if(document.getElementById('email-action').value==='save_launch'){
+     if(!confirm('Send this email to ALL confirmed subscribers? This cannot be undone.'))e.preventDefault();
+   }
+ });
+})();
+</script>
 <?php if(!$draft): ?><p class="muted">This campaign is <?=dd_e($c['status'])?> and can no longer be edited. Create a new email to make changes.</p><?php endif; ?></div>
 <?php endif; ?>
 <?php else: ?><h1>Page not found</h1><?php endif; ?></main>
