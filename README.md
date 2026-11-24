@@ -12,14 +12,14 @@
 - A scheduled PHP worker sends no more than 20 messages a minute and 250 attempted emails in a rolling 24 hours.
 - Email sending through **Brevo's API**; no direct mass mail from the VPS.
 - Private SQLite data at `/var/lib/dieseldesigns-newsletter/subscribers.sqlite` and secrets at `/etc/dieseldesigns-newsletter/config.php` (outside public webroot).
-- Version 1 emails are **plain text inside a branded template** (automatically linked URLs). Rich visual layout editing, analytics, scheduled campaigns, segmentation, and bounce webhooks are *not* included.
+- Version 2 adds **Rich Text / HTML** composing with a restricted, server-cleaned HTML body, inline text formatting, lists, links, images by HTTPS URL, test sends and one-step Send to All. Drag-and-drop design, analytics, scheduled campaigns, segmentation, and bounce webhooks are *not* included.
 
 ## Before installation
 
 1. Create a [Brevo](https://www.brevo.com/) account and get an API key with transactional sending enabled. Verify your sending domain and set DNS SPF, DKIM and ideally DMARC as instructed in Brevo. Your sender email must use a verified domain and should be a monitored inbox.
 2. Decide the admin username and a strong password. Have an email address to receive test messages.
 3. Have your **business mailing address** ready for the footer. The FTC requires a valid physical mailing address for commercial emails. A registered USPS PO Box or properly registered private mailbox is acceptable.
-4. Confirm your server has PHP 8.3 with `pdo_sqlite` and `curl` extensions. Check `php -m | grep -Ei 'pdo_sqlite|curl'`. If missing, install `php8.3-sqlite3` and/or `php8.3-curl` with apt, then restart PHP-FPM as appropriate.
+4. Confirm your server has PHP 8.3 with `pdo_sqlite`, `curl`, and `dom` extensions. Check `php -m | grep -Ei 'pdo_sqlite|curl|dom'`. If missing, install `php8.3-sqlite3`, `php8.3-curl`, and/or `php8.3-xml` with apt, then restart PHP-FPM as appropriate.
 5. This is a first-version app. Review it on a staging copy before putting it into production. Confirm DNS, HTTPS, server configuration, and proper backup access.
 
 ## Deploy with a dated backup
@@ -32,7 +32,7 @@
    sudo bash install.sh
    ```
 
-3. The installer performs checks, saves a timestamped homepage backup to `/root/dieseldesigns-backups/`, copies newsletter and admin code, inserts a CSS link and form include in the existing homepage, writes private configuration, creates the SQLite tables, and adds a cron sender.
+3. The installer performs checks, saves a verified timestamped site and Nginx backup to `/root/dieseldesigns-backups/`, copies newsletter and admin code, inserts a CSS link and form include in the existing homepage, writes private configuration, creates the SQLite tables, and adds a cron sender.
 4. Visit `/admin/`, log in, send yourself a test, subscribe with a separate address, confirm, check the dashboard, and send a tiny test campaign before promoting the form.
 
 **Important:** The script refuses to overwrite any existing `admin/index.php` or `newsletter/common.php`. It requires a homepage with exactly one `</main>` and one `</head>`, which matches the previously reviewed PHP homepage. No live deployment has been performed by this package's creation.
@@ -47,7 +47,7 @@
 
 ## How to use
 
-- `/admin/` → **New Email** → enter subject + text → **Save Draft**.
+- `/admin/` → **New Email** → enter subject + formatted message (or HTML) → **Save Draft**, **Send Test**, or **Send to All Subscribers**.
 - Open the saved draft → **Preview** → use **Send test** from the form to send a message to the configured test recipient.
 - Saved draft → **Send to all subscribers**. Sends queue automatically and are processed by cron once a minute. The dashboard shows counts.
 - Each subscriber has a cryptographically signed unsubscribe link in every marketing email. The one-click mail header supports POST while the visible link first displays a confirmation page so link previews cannot unsubscribe people accidentally.
