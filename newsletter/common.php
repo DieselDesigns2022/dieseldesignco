@@ -119,15 +119,100 @@ function dd_email_html(string $title, string $bodyHtml, ?string $unsubscribeUrl 
       . '<tr><td style="padding:30px"><h1 style="font-size:24px;margin:0 0 18px">' . dd_e($title) . '</h1>'
       . '<div style="font-size:16px;line-height:1.75">' . $bodyHtml . '</div>' . $footer . '</td></tr></table></td></tr></table></body></html>';
 }
+/**
+ * Allow a narrow, safe subset of HTML for rich-text newsletters.
+ * The same cleaned markup is used for previews and for delivered emails.
+ */
+function dd_clean_html(string $input): string {
+    $input = trim($input);
+    if ($input === '') return '';
+    if (!class_exists(DOMDocument::class)) throw new RuntimeException('PHP DOM extension is required for HTML email editing.');
+    // Backward compatibility for previously saved plain-text drafts.
+    if (!preg_match('/<\s*[a-z][a-z0-9]*\b/i', $input)) return nl2br(dd_e($input), false);
+    if (preg_match('~<body\b[^>]*>(.*?)</body>~is', $input, $m)) $input = $m[1];
+    $input = preg_replace('~<!DOCTYPE[^>]*>~i', '', $input) ?? $input;
+    $doc = new DOMDocument('1.0', 'UTF-8');
+    $previous = libxml_use_internal_errors(true);
+    try {
+        $loaded = $doc->loadHTML('<?xml encoding="utf-8"?><html><body><div id="dd-safe-mail-root">' . $input . '</div></body></html>', LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING);
+        if (!$loaded) throw new RuntimeException('Could not parse email HTML.');
+        $root = $doc->getElementById('dd-safe-mail-root');
+        if (!$root) {
+            $divs = $doc->getElementsByTagName('div');
+            foreach ($divs as $div) if ($div->getAttribute('id') === 'dd-safe-mail-root') { $root = $div; break; }
+        }
+        if (!$root) throw new RuntimeException('Invalid email HTML document.');
+        $out = new DOMDocument('1.0', 'UTF-8');
+        $dest = $out->createElement('div'); $out->appendChild($dest);
+        foreach ($root->childNodes as $child) dd_copy_safe_node($child, $dest, $out);
+        $html = '';
+        foreach ($dest->childNodes as $child) $html .= $out->saveHTML($child);
+        return $html;
+    } finally {
+        libxml_clear_errors(); libxml_use_internal_errors($previous);
+    }
+}
+function dd_copy_safe_node(DOMNode $node, DOMNode $parent, DOMDocument $out): void {
+    if ($node instanceof DOMText) { $parent->appendChild($out->createTextNode($node->nodeValue)); return; }
+    if (!($node instanceof DOMElement)) return;
+    $tag = strtolower($node->tagName);
+    // Discard scripts and potentially dangerous descendants entirely.
+    if (in_array($tag, ['script','style','iframe','object','embed','form','input','button','svg','math','meta','link','base','head','title','video','audio'], true)) return;
+    $allowed = ['font','p','div','span','strong','b','em','i','u','s','br','ul','ol','li','h1','h2','h3','h4','blockquote','a','img','hr','table','tbody','thead','tfoot','tr','td','th'];
+    if (!in_array($tag, $allowed, true)) {
+        foreach ($node->childNodes as $child) dd_copy_safe_node($child,$parent,$out);
+        return;
+    }
+    // Legacy browser editors often emit <font color>; convert it to safe span markup.
+    if ($tag==='font') $tag='span';
+    $el = $out->createElement($tag);
+    if (strtolower($node->tagName)==='font' && preg_match('/^#[0-9a-f]{3,8}$/iD', $node->getAttribute('color'))) {
+        $el->setAttribute('style', 'color:'.strtolower($node->getAttribute('color')));
+    }
+    if ($node->hasAttribute('style')) {
+        $styles = [];
+        foreach (explode(';',$node->getAttribute('style')) as $declaration) {
+            if (!str_contains($declaration,':')) continue;
+            [$name,$value] = array_map('trim',explode(':',$declaration,2));
+            $name=strtolower($name); $value=strtolower($value);
+            $color = (bool)preg_match('/^(#[0-9a-f]{3,8}|rgb\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*\)|[a-z]{2,20})$/D', $value);
+            $safe = match($name) {
+                'color','background-color' => $color,
+                'text-align' => in_array($value,['left','center','right','justify'],true),
+                'font-size' => (bool)preg_match('/^(?:[1-9]|[1-6][0-9])px$/D',$value),
+                'font-weight' => in_array($value,['bold','normal','400','600','700'],true),
+                'text-decoration' => in_array($value,['none','underline','line-through'],true),
+                'width','max-width' => (bool)preg_match('/^\d{1,4}(?:px|%)$/D',$value),
+                default => false
+            };
+            if ($safe) $styles[]=$name.':'.$value;
+        }
+        if ($styles) $el->setAttribute('style',trim($el->getAttribute('style').';'.implode(';',$styles),';'));
+    }
+    if ($tag==='a') {
+        $href = trim($node->getAttribute('href'));
+        if (preg_match('~^(https?://[^\s"<>]+|mailto:[^\s"<>@]+@[^\s"<>@]+)$~iD', $href)) $el->setAttribute('href', $href);
+        else { foreach ($node->childNodes as $child) dd_copy_safe_node($child,$parent,$out); return; }
+    }
+    if ($tag==='img') {
+        $src=trim($node->getAttribute('src'));
+        if (!preg_match('~^https://[^\s"<>]+$~iD',$src)) return;
+        $el->setAttribute('src',$src);
+        $el->setAttribute('alt',substr($node->getAttribute('alt'),0,200));
+        foreach (['width','height'] as $dim) {
+            $v=$node->getAttribute($dim);
+            if (preg_match('/^\d{1,4}$/D',$v)) $el->setAttribute($dim,$v);
+        }
+    }
+    if (in_array($tag,['td','th'],true)) {
+        $colspan=$node->getAttribute('colspan');
+        if (preg_match('/^[1-9][0-9]?$/D',$colspan)) $el->setAttribute('colspan',$colspan);
+    }
+    $parent->appendChild($el);
+    foreach ($node->childNodes as $child) dd_copy_safe_node($child,$el,$out);
+}
 function dd_render_body(string $body): string {
-    // Plain text is escaped to prevent scripts and unsafe HTML from reaching subscribers.
-    $escaped = dd_e($body);
-    $linked = preg_replace_callback('~https?://[^\s&lt;&gt;"\']+~i', static function(array $m): string {
-        // htmlspecialchars has already escaped &, <, >, quotes. Keep links scheme-limited.
-        $url = html_entity_decode($m[0], ENT_QUOTES | ENT_HTML5, 'UTF-8');
-        return '<a style="color:#8e58d8" href="' . dd_e($url) . '">' . $m[0] . '</a>';
-    }, $escaped);
-    return nl2br($linked ?? $escaped, false);
+    return dd_clean_html($body);
 }
 function dd_send_mail(string $recipient, string $subject, string $html, ?string $unsubscribeUrl = null): void {
     $cfg = dd_config();
