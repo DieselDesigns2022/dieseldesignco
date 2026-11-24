@@ -11,9 +11,14 @@ SOURCE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 [[ "$EUID" -eq 0 ]] || { echo 'Run with sudo: sudo bash install.sh'; exit 1; }
 [[ -f "$SITE/index.php" ]] || { echo "Missing $SITE/index.php — no changes made."; exit 1; }
 [[ -f "$SOURCE/newsletter/common.php" && -f "$SOURCE/admin/index.php" ]] || { echo 'Incomplete package'; exit 1; }
-[[ ! -e "$SITE/admin/index.php" && ! -e "$SITE/newsletter/common.php" && ! -e "$CONFIG_DIR/config.php" ]] || { echo 'Admin/newsletter files already exist. Stopping to avoid overwriting them.'; exit 1; }
-for extension in pdo_sqlite curl; do
-  php -m | grep -iq "^${extension}$" || { echo "PHP extension $extension is missing. Install PHP 8.3 sqlite3/curl extensions and retry."; exit 1; }
+[[ ! -e "$SITE/admin" && ! -e "$SITE/newsletter" && ! -e "$CONFIG_DIR/config.php" ]] || { echo 'Admin/newsletter files already exist. Stopping to avoid overwriting them.'; exit 1; }
+for extension in pdo_sqlite curl dom; do
+  php -m | grep -iq "^${extension}$" || { echo "PHP extension $extension is missing. Install PHP 8.3 sqlite3/curl/xml extensions and retry."; exit 1; }
+done
+# Inspect the current Nginx configuration without modifying it.
+nginx -t >/dev/null
+for source in "$SOURCE"/newsletter/*.php "$SOURCE"/admin/index.php "$SITE/index.php"; do
+  php -l "$source" >/dev/null || { echo "PHP syntax check failed: $source"; exit 1; }
 done
 python3 - "$SITE/index.php" <<'PY'
 import sys
@@ -40,11 +45,36 @@ read -r -s -p 'Brevo API key (press Enter to configure later): ' DD_BREVO_API_KE
 printf '\n'
 export DD_ADMIN_USERNAME DD_ADMIN_PASSWORD DD_TEST_EMAIL DD_SENDER_EMAIL DD_SENDER_NAME DD_POSTAL_ADDRESS DD_BREVO_API_KEY
 
-mkdir -p "$BACKUPS"
+# Full restore point before touching live files. Keep outside GitHub and webroot.
+install -d -m 700 -o root -g root "$BACKUPS"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 BACKUP_FILE="$BACKUPS/index-before-newsletter-$STAMP.php"
+BACKUP_TAR="$BACKUPS/full-site-before-newsletter-$STAMP.tar.gz"
+BACKUP_SHA="$BACKUPS/full-site-before-newsletter-$STAMP.sha256"
 cp -a -- "$SITE/index.php" "$BACKUP_FILE"
-echo "Homepage backup saved: $BACKUP_FILE"
+BACKUP_PATHS=("var/www/dieseldesigns.net/html")
+[[ -f /etc/nginx/sites-available/dieseldesigns.net ]] && BACKUP_PATHS+=("etc/nginx/sites-available/dieseldesigns.net")
+[[ -f /var/lib/dieseldesigns-counter/visits.json ]] && BACKUP_PATHS+=("var/lib/dieseldesigns-counter/visits.json")
+tar -C / -czpf "$BACKUP_TAR" "${BACKUP_PATHS[@]}"
+tar -tzf "$BACKUP_TAR" >/dev/null
+sha256sum "$BACKUP_TAR" > "$BACKUP_SHA"
+(cd "$BACKUPS" && sha256sum -c "$(basename "$BACKUP_SHA")")
+echo "Verified full-site backup: $BACKUP_TAR"
+echo "Homepage backup: $BACKUP_FILE"
+
+COMPLETED=0
+rollback_on_failure() {
+  exit_code=$?
+  if [[ "$exit_code" -ne 0 && "$COMPLETED" -eq 0 ]]; then
+    echo "Install failed. Reverting all new newsletter files and original homepage."
+    rm -f -- /etc/cron.d/dieseldesigns-newsletter
+    rm -rf -- "$SITE/admin" "$SITE/newsletter"
+    cp -a -- "$BACKUP_FILE" "$SITE/index.php"
+    rm -f -- "$CONFIG_DIR/config.php"
+    echo "Restore attempt finished. Verified full backup is retained: $BACKUP_TAR"
+  fi
+}
+trap rollback_on_failure EXIT
 
 install -d -m 750 -o root -g www-data "$CONFIG_DIR"
 install -d -m 750 -o www-data -g www-data "$DATA_DIR"
@@ -88,11 +118,12 @@ unset DD_ADMIN_PASSWORD DD_BREVO_API_KEY DD_SECRET
 chown root:www-data "$CONFIG_DIR/config.php"
 chmod 640 "$CONFIG_DIR/config.php"
 # Initialize data with the same system user as the PHP web worker.
-sudo -u www-data php -r 'require "/var/www/dieseldesigns.net/html/newsletter/common.php"; dd_schema(dd_db()); echo "Database ready\n";'
+runuser -u www-data -- php -r 'require "/var/www/dieseldesigns.net/html/newsletter/common.php"; dd_schema(dd_db()); echo "Database ready\n";'
 # Cron will send a maximum of 20 messages per minute and 250 attempts in a rolling 24-hour window.
 printf '%s\n' '* * * * * www-data /usr/bin/php /var/www/dieseldesigns.net/html/newsletter/worker.php >/dev/null 2>&1' > /etc/cron.d/dieseldesigns-newsletter
 chmod 644 /etc/cron.d/dieseldesigns-newsletter
-printf '\nINSTALL COMPLETE!\nSite: https://dieseldesigns.net/\nAdmin: https://dieseldesigns.net/admin/\nBackup: %s\n' "$BACKUP_FILE"
+COMPLETED=1
+printf '\nINSTALL COMPLETE!\nSite: https://dieseldesigns.net/\nAdmin: https://dieseldesigns.net/admin/\nFull backup: %s\n' "$BACKUP_TAR"
 printf 'Test the signup and confirm email delivery before inviting subscribers.\n'
 printf 'If your Brevo API key was blank, edit /etc/dieseldesigns-newsletter/config.php to add it.\n'
 printf 'Keep the /etc configuration and /var/lib data out of GitHub.\n'
